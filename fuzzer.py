@@ -26,6 +26,45 @@ logging.basicConfig(
 if '--debug' in sys.argv:
     logger.setLevel(logging.DEBUG)
 
+def get_headers_only(url):
+    """Fetch only headers from the target when using seed file"""
+    try:
+        logger.info(f"Fetching headers from {url}")
+        # Try HEAD first to be lightweight
+        response = requests.head(url)
+        # If HEAD fails or returns error, try GET (some servers block HEAD)
+        if response.status_code >= 400:
+            response = requests.get(url, stream=True)
+            response.close()
+        return dict(response.headers)
+    except requests.RequestException as e:
+        logger.error(f"Network error while fetching headers: {e}")
+        return {}
+
+def load_seed_file(filepath):
+    """Read URLs/Paths from a seed file"""
+    try:
+        if not os.path.exists(filepath):
+            logger.error(f"Seed file not found: {filepath}")
+            sys.exit(1)
+            
+        with open(filepath, 'r') as f:
+            # Read lines, strip whitespace
+            links = []
+            for line in f:
+                clean_line = line.strip()
+                if clean_line:
+                    # Remove leading slash if present to match extract_links format
+                    if clean_line.startswith('/'):
+                        clean_line = clean_line[1:]
+                    links.append(clean_line)
+        
+        logger.info(f"Successfully loaded {len(links)} seed paths from file")
+        return links
+    except Exception as e:
+        logger.error(f"Error reading seed file: {e}")
+        return []
+
 def extract_links(url):
     """Extract first 25 links from the main page"""
     try:
@@ -163,6 +202,8 @@ def main():
     parser.add_argument('--prompt-file', default='prompts/files.txt', help='Path to prompt file (default: prompts/files.txt)')
     parser.add_argument('--status-codes', type=str, default='200,301,302,303,307,308,403,401,500',
                     help='Comma-separated list of status codes to consider as successful (default: 200,301,302,303,307,308,403,401,500)')    
+    # Added seed argument
+    parser.add_argument('--seed', help='Path to a file containing initial seed URLs/Paths (bypasses scraping)')
 
     args = parser.parse_args()
 
@@ -180,17 +221,25 @@ def main():
     base_url = url_match.group(1).replace('FUZZ', '')
     considered_status_codes = [int(code) for code in args.status_codes.split(',')]
     
-    # Initial setup
-    initial_links, headers = extract_links(base_url)
+    # Initial setup logic
+    if args.seed:
+        print(f"\n{Fore.CYAN}Using seed file: {args.seed}{Style.RESET_ALL}")
+        initial_links = load_seed_file(args.seed)
+        # We still need headers for the AI prompt, so we fetch them without parsing HTML
+        headers = get_headers_only(base_url)
+    else:
+        # Default behavior: Scrape the site
+        initial_links, headers = extract_links(base_url)
+
     unique_initial_links = set(initial_links)
-    print(f"\n{Fore.LIGHTBLACK_EX}Initial unique links extracted from website:{Style.RESET_ALL}")
+    print(f"\n{Fore.LIGHTBLACK_EX}Initial unique links (Base Context):{Style.RESET_ALL}")
     for link in sorted(unique_initial_links):
         print(f"  {Fore.LIGHTBLACK_EX}{link}{Style.RESET_ALL}")
     print()
     
     all_links = set(initial_links)  # all links including tried ones
     new_discovered_links = set()    # only links discovered by ffuf
-    tested_links = set()           # links that were tested with ffuf
+    tested_links = set()            # links that were tested with ffuf
     server_headers = format_headers(headers)
     
     # Read prompt template from specified file
